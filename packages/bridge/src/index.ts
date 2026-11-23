@@ -53,6 +53,9 @@ import {
 import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
 import { DialogFolderStore } from './dialog-folders.js'
 import {
+  ConversationMemberStore, ConversationMemberSyncWorker, memberSyncSessions,
+} from './conversation-members.js'
+import {
   collectStickerDashboard, setStickerPackAssignment,
   type StickerDashboardPack, type StickerDashboardSourceAccount, type StickerPackDashboardData,
 } from './sticker-dashboard.js'
@@ -102,6 +105,7 @@ export * from './auth-transfer.js'
 export * from './login-token.js'
 export * from './blocked-peers.js'
 export * from './dialog-folders.js'
+export * from './conversation-members.js'
 export * from './voice/call-registry.js'
 export * from './voice/media.js'
 export * from './voice/voice-worker-client.js'
@@ -144,6 +148,7 @@ export interface BridgeConfig {
   autoMuteGroupChats?: boolean
   blockedContentMode?: BlockedContentMode
   recalledMessageMode?: 'hide' | 'show'
+  memberSyncEnabled?: boolean
   voiceWorker?: VoiceWorkerClient
   /** 本地 Rust voice-worker Unix socket 路径；为空则禁用语音通话。 */
   voiceWorkerSocketPath?: string
@@ -194,6 +199,7 @@ export const Config = z.object({
     z.const('show'), z.const('hide-user'), z.const('hide-related'),
   ]).default('hide-user'),
   recalledMessageMode: z.union([z.const('hide'), z.const('show')]).default('show'),
+  memberSyncEnabled: z.boolean().default(true),
   voiceWorkerSocketPath: z.string().default(''),
   voiceWorkerTimeoutMs: z.natural().min(1).max(60_000).default(5_000),
   voiceDirectIce: z.boolean().default(true),
@@ -307,6 +313,43 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     ctx.database, config.blockedContentMode ?? 'hide-user',
   )
   const dialogFolders = new DialogFolderStore(ctx.database)
+  const conversationMembers = new ConversationMemberStore(ctx.database)
+  const memberSync = new ConversationMemberSyncWorker(
+    () => memberSyncSessions(platforms),
+    store,
+    conversationMembers,
+    (platformSessionId) => historySync.lastActivityAt(platformSessionId),
+    {
+      enabled: config.memberSyncEnabled ?? true,
+      log: (level, format, ...args) => bridgeLogger[level](format, ...args),
+    },
+  )
+  ctx.effect(() => {
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const schedule = (delay: number) => {
+      if (stopped) return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(run, delay)
+      timer.unref?.()
+    }
+    const run = async () => {
+      timer = undefined
+      if (stopped) return
+      try {
+        await memberSync.tick()
+      } catch (error) {
+        bridgeLogger.warn('conversation member sync tick failed: %s', String(error))
+      }
+      schedule(memberSync.nextDelay())
+    }
+    schedule(5_000)
+    return () => {
+      stopped = true
+      memberSync.stop()
+      if (timer) clearTimeout(timer)
+    }
+  }, 'mtproto-bridge.member-sync')
   const uploads = new UploadManager(resolve(config.uploadPath ?? 'data/bridge-uploads'))
   const stickerRpcs = new Map<string, { platform: IMPlatform, rpc: StickerRpc }>()
   const reactionRpcs = new Map<string, { platform: IMPlatform, rpc: ReactionRpc }>()
@@ -465,6 +508,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     eventTrace,
     ctx,
     config.recalledMessageMode ?? 'show',
+    conversationMembers,
   )
   platforms.attachLocalMessageIngress(
     (session, conversation, message) => subscriptions.ingestLocalEvent(session, { type: 'message', conversation, message }),
@@ -515,6 +559,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     sendEchoes,
     scheduledStore,
     () => { void scheduledDispatcher?.rescan() },
+    conversationMembers,
   )
   const requireBridgeSession: typeof resolveBridgeSession = async (rpcContext, ...rest) => {
     const state = await resolveBridgeSession(rpcContext, ...rest)
@@ -1327,6 +1372,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     bareVector(await (await requireBridgeSession(rpc)).dialogs.getUsers(req as tl.users.RawGetUsersRequest)))
   rpc.register('users.getFullUser', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getFullUser(req as tl.users.RawGetFullUserRequest))
+  rpc.register('messages.getCommonChats', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getCommonChats(req as tl.messages.RawGetCommonChatsRequest))
   rpc.register('messages.getPeerSettings', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getPeerSettings(req as tl.messages.RawGetPeerSettingsRequest))
   rpc.register('channels.getFullChannel', async (rpc, req) =>
@@ -1631,6 +1678,7 @@ export function createSessionResolver(
   sendEchoes?: SendEchoes,
   scheduled?: ScheduledMessageStore,
   onScheduledChange?: () => void,
+  conversationMembers?: ConversationMemberStore,
 ) {
   const projection = messageProjection ?? new MessageProjectionPipeline(ctx)
   const loading = new Map<string, Promise<BridgeSessionState>>()
@@ -1704,6 +1752,7 @@ export function createSessionResolver(
       sendEchoes,
       scheduled,
       onScheduledChange,
+      conversationMembers,
     })
     return state
   }

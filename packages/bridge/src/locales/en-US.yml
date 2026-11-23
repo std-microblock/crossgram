@@ -8,6 +8,7 @@ uploadPath: Directory used to store uploads received from Telegram clients.
 autoMuteGroupChats: Mute group chats by default; per-chat Telegram settings can override this.
 blockedContentMode: "Blocked-user visibility: show keeps Telegram's default group behavior; hide-user hides their messages and reactions; hide-related also hides messages replying to or mentioning them."
 recalledMessageMode: "QQ recalled-message visibility: show keeps the message with a recalled marker; hide removes it from visible history."
+memberSyncEnabled: Periodically sync group member lists in the background to power Telegram's Groups in Common feature.
 voiceWorkerSocketPath: Local Unix socket path for the Rust voice worker; leave empty to disable voice calls.
 voiceWorkerTimeoutMs: Maximum time in milliseconds for one local voice-worker request.
 voiceDirectIce: Allow direct ICE only when the configured MTProto host is loopback or private LAN.

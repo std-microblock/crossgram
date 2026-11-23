@@ -7,6 +7,7 @@ import { Context, Service, type Fiber } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
 import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult, type ReadResult } from './message-store.js'
 import { isLocalOnlyConversation, requestInboxConversation, requestInboxMessage } from './request-inbox.js'
+import type { ConversationMemberStore } from './conversation-members.js'
 import { jsonContains, jsonEquals } from './stable-json.js'
 import type {
   IMConversation, IMDialog, IMDialogPage, IMEvent, IMHistoryPage, IMHistoryQuery, IMMessage,
@@ -225,6 +226,7 @@ export class PlatformSubscriptionManager {
     private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
     private readonly _ctx: Context = new Context(),
     private readonly _recalledMessageMode: RecalledMessageMode = 'show',
+    private readonly _conversationMembers?: ConversationMemberStore,
   ) {}
 
   async startActiveSessions(platformId?: string): Promise<void> {
@@ -427,6 +429,21 @@ export class PlatformSubscriptionManager {
       await this._store.upsertConversation(session, event.conversation)
     } else if (event.type === 'message') {
       const result = await this._store.ingest(session, event.conversation, event.message)
+      if (this._conversationMembers) {
+        try {
+          await this._conversationMembers.recordMessageMembers(
+            session.platformSessionId,
+            event.conversation,
+            event.message,
+            { live: event.delivery !== 'recovery' },
+          )
+        } catch (error) {
+          this._onTrace?.(
+            'conversation member record failed platform=%s session=%s conversation=%s error=%s',
+            session.platformId, session.platformSessionId, event.conversation.id, formatError(error),
+          )
+        }
+      }
       this._onTrace?.(
         'platform message ingested platform=%s session=%s conversation=%s message=%s created=%s changed=%s projection=%d',
         session.platformId, session.platformSessionId, event.conversation.id, event.message.id,

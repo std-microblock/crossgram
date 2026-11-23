@@ -88,4 +88,17 @@ describe('bridge models', () => {
     expect(messageOptions.unique).toEqual([['conversationId', 'primaryPlatformMessageId']])
     expect(aliasOptions.unique).toEqual([['conversationId', 'platformMessageId']])
   })
+
+  it('declares a covering index on conversation members for common-chats lookups', () => {
+    const extend = vi.fn()
+    defineModels({ model: { extend } } as never)
+    const memberOptions = extend.mock.calls.find(([table]) => table === 'mtproto_conversation_member')![2]
+
+    expect(memberOptions.unique).toEqual([['platformSessionId', 'platformConversationId', 'platformUserId']])
+    expect(memberOptions.indexes).toContainEqual({
+      name: 'mtproto_conv_member_user_idx',
+      keys: { platformSessionId: 'asc', platformUserId: 'asc', platformConversationId: 'asc' },
+    })
+    expect(Buffer.byteLength('mtproto_conv_member_user_idx')).toBeLessThanOrEqual(63)
+  })
 })

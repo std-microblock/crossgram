@@ -41,6 +41,7 @@ import type { DraftStore, StoredDraft } from './draft-store.js'
 import type { ScheduledMessage, ScheduledMessageStore } from './scheduled-messages.js'
 import { MUTE_FOREVER, type NotificationSettingsStore, type NotificationTarget } from './notification-settings.js'
 import type { BlockedPeerChange, BlockedPeerStore } from './blocked-peers.js'
+import { displayGroupConversationId, type ConversationMemberStore } from './conversation-members.js'
 import { SystemPeerCallbackError, type SystemPeerResolution, type SystemPeerService } from './system-peer.js'
 import {
   decodeDialogFilterTitle, encodeDialogFilterTitle,
@@ -283,6 +284,7 @@ export interface DialogRpcOptions {
   sendEchoes?: SendEchoes
   scheduled?: ScheduledMessageStore
   onScheduledChange?: () => void
+  conversationMembers?: ConversationMemberStore
 }
 
 export class DialogRpc {
@@ -356,6 +358,7 @@ export class DialogRpc {
   private readonly _sendEchoes?: SendEchoes
   private readonly _scheduled?: ScheduledMessageStore
   private readonly _onScheduledChange?: () => void
+  private readonly _conversationMembers?: ConversationMemberStore
 
   constructor(
     private readonly _platform: IMPlatform<any>,
@@ -368,6 +371,7 @@ export class DialogRpc {
       onLocalEvent, authKeyId, onTrace, drafts, onDraftUpdate,
       notificationSettings, authenticatedSelfId, blockedPeers, dialogFolders,
       systemPeers, messageProjection, sendEchoes, scheduled, onScheduledChange,
+      conversationMembers,
     } = options
     this._uploads = uploads
     this._onTransferProgress = onTransferProgress
@@ -389,6 +393,7 @@ export class DialogRpc {
     this._sendEchoes = sendEchoes
     this._scheduled = scheduled
     this._onScheduledChange = onScheduledChange
+    this._conversationMembers = conversationMembers
     this._actions = new PlatformMessageActions(_platform, _session)
     // 有 `MessageStore` 时淘汰旧条目并由数据库兜底；无存储模式不可淘汰，避免重用已分配的 ID。
     const messageIndexLimit = store ? MAX_CACHED_MESSAGE_INDEX_ENTRIES : Number.POSITIVE_INFINITY
@@ -2203,6 +2208,9 @@ export class DialogRpc {
       }
     }
     const about = profile?.about
+    const commonChatsCount = peerId && peerId !== this._session.userId
+      ? (await this._commonGroupConversations(peerId)).length
+      : 0
     return {
       _: 'users.userFull',
       fullUser: {
@@ -2216,11 +2224,35 @@ export class DialogRpc {
         notifySettings: await this._peerNotifySettings(peerId ?? this._session.userId),
         // 缺少 `userFull.bot_info` 会使 Telegram Desktop 将 `BotInfo::inited` 保持为 false，在聊天打开期间死循环请求 `users.getFullUser` 并回滚未提交的静音设置。
         ...(user._ === 'user' && user.bot === true ? { botInfo: makeBotInfo(about) } : {}),
-        commonChatsCount: 0,
+        commonChatsCount,
       },
       chats: [],
       users: [user],
     }
+  }
+
+  async getCommonChats(req: tl.messages.RawGetCommonChatsRequest): Promise<tl.messages.TypeChats> {
+    await this._hydratePeers()
+    await this._getInputUser(req.userId)
+    const peerId = req.userId._ === 'inputUserSelf'
+      ? this._session.userId
+      : req.userId._ === 'inputUser' || req.userId._ === 'inputUserFromMessage'
+        ? this._tlToUser.get(req.userId.userId)
+        : undefined
+    if (!peerId || peerId === this._session.userId) {
+      return { _: 'messages.chats', chats: [] }
+    }
+    const all = await this._commonGroupConversations(peerId)
+    const maxId = Number.isFinite(req.maxId) && req.maxId > 0 ? req.maxId : 0
+    const limit = req.limit > 0 ? clampLimit(req.limit) : 100
+    const filtered = maxId > 0
+      ? all.filter((conversation) => this._peerId(conversation.id) < maxId)
+      : all
+    const chats = filtered.slice(0, limit).map((conversation) => this._makeChat(conversation))
+    if (maxId > 0 || chats.length < all.length) {
+      return { _: 'messages.chatsSlice', count: all.length, chats }
+    }
+    return { _: 'messages.chats', chats }
   }
 
   async getPeerSettings(req: tl.messages.RawGetPeerSettingsRequest): Promise<tl.messages.RawPeerSettings> {
@@ -2397,6 +2429,12 @@ export class DialogRpc {
       ? await this._platform.getConversationMember(this._session, { id: conversation.id }, userId)
       : (await this._allMembers(conversation.id)).find((item) => item.user.id === userId)
     if (!member) throw new RpcError(400, 'USER_NOT_PARTICIPANT')
+    const groupId = displayGroupConversationId(conversation)
+    if (groupId && this._conversationMembers) {
+      await this._conversationMembers.recordMembers(
+        this._session.platformSessionId, groupId, [member.user.id], 'member-list',
+      )
+    }
     return {
       _: 'channels.channelParticipant',
       participant: this._makeChannelParticipant(member),
@@ -2513,6 +2551,12 @@ export class DialogRpc {
       this._session, { id: conversation.id }, targetId, action,
     )
     this._memberPages.delete(conversation.id)
+    if (action.type === 'kick' && this._conversationMembers) {
+      const groupId = displayGroupConversationId(conversation)
+      if (groupId) {
+        await this._conversationMembers.removeMember(this._session.platformSessionId, groupId, targetId)
+      }
+    }
     return {
       _: 'updates', updates: [], users: [this._makeMemberUser(target)],
       chats: [this._makeChat(conversation)], date: now, seq: 0,
@@ -5999,6 +6043,82 @@ export class DialogRpc {
       state.seenCursors.add(nextCursor)
     }
     await this._persistUsers(page.members.map((member) => member.user))
+    if (this._conversationMembers) {
+      const groupId = displayGroupConversationId(this._conversations.get(conversationId))
+      if (groupId) {
+        if (state.complete && !repeatedCursor && state.members.length > 0) {
+          await this._conversationMembers.reconcileConversationMembers(
+            this._session.platformSessionId,
+            groupId,
+            state.members.map((member) => member.user.id),
+          )
+        } else if (page.members.length > 0) {
+          await this._conversationMembers.recordMembers(
+            this._session.platformSessionId,
+            groupId,
+            page.members.map((member) => member.user.id),
+            'member-list',
+          )
+        }
+      }
+    }
+  }
+
+  private async _commonGroupConversations(peerId: string): Promise<IMConversation[]> {
+    if (!peerId || peerId === this._session.userId) return []
+    const candidateIds = new Set<string>()
+    if (this._conversationMembers) {
+      const stored = await this._conversationMembers.listUserConversations(
+        this._session.platformSessionId, peerId,
+      )
+      for (const id of stored) candidateIds.add(id)
+    }
+    for (const [conversationId, state] of this._memberPages) {
+      if (state.members.some((member) => member.user.id === peerId)) {
+        candidateIds.add(conversationId)
+      }
+    }
+    if (this._platform.getCommonConversations) {
+      try {
+        for (const id of await this._platform.getCommonConversations(this._session, peerId)) {
+          candidateIds.add(id)
+        }
+      } catch {
+      }
+    }
+
+    const resolved = new Map<string, IMConversation>()
+    for (const rawId of candidateIds) {
+      let conversation = this._conversations.get(rawId)
+      if (!conversation && this._store) {
+        conversation = await this._store.getConversation(this._session.platformSessionId, rawId)
+        if (conversation) {
+          this._conversations.set(conversation.id, conversation)
+          this._peerId(conversation.id)
+        }
+      }
+      if (!conversation) continue
+      const groupId = displayGroupConversationId(conversation)
+      if (!groupId) continue
+      if (groupId !== conversation.id) {
+        let parent = this._conversations.get(groupId)
+        if (!parent && this._store) {
+          parent = await this._store.getConversation(this._session.platformSessionId, groupId)
+          if (parent) {
+            this._conversations.set(parent.id, parent)
+            this._peerId(parent.id)
+          }
+        }
+        if (!parent || displayGroupConversationId(parent) !== parent.id) continue
+        conversation = parent
+      }
+      if (this._isSubchannel(conversation)) continue
+      resolved.set(conversation.id, conversation)
+    }
+
+    return [...resolved.values()].sort(
+      (left, right) => this._peerId(right.id) - this._peerId(left.id),
+    )
   }
 
   private _makeMemberUser(member: IMConversationMember<any>): tl.RawUser {

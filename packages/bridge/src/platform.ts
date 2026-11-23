@@ -830,6 +830,11 @@ export interface IMPlatform<TMediaLocator = unknown> {
     conversation: IMConversationRef,
     query?: IMPageQuery,
   ): Promise<IMConversationMemberPage<TMediaLocator>>
+  /** 可选：返回当前账号与目标用户共同所在的群/频道会话 ID，用于补充或替代本地成员索引。 */
+  getCommonConversations?(
+    session: PlatformSession,
+    userId: string,
+  ): Promise<string[]>
   setConversationMemberRole?(
     session: PlatformSession,
     conversation: IMConversationRef,

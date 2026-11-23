@@ -1811,6 +1811,179 @@ describe('DialogRpc', () => {
       expect(map.limit).toBe(Number.POSITIVE_INFINITY)
     }
   })
+
+  it('serves commonChatsCount and paginates messages.getCommonChats descending by chat id', async () => {
+    const perms = {
+      manageConversation: false, manageMembers: true, deleteAnyMessage: false,
+      editAnyMessage: false, pinMessages: false, inviteMembers: true,
+    }
+    const groupMembers: Record<string, string[]> = {
+      'group-1': ['me', 'alice', 'bob'],
+      'group-2': ['me', 'alice'],
+      'group-3': ['me', 'alice'],
+      'group-4': ['me', 'bob'],
+    }
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: true },
+        members: { list: true, administrators: true, permissions: true },
+      },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('unused') },
+      async getHistory() { return { messages: [] } },
+      async getDialogs() {
+        return {
+          dialogs: [
+            { conversation: { id: 'alice', kind: 'direct' as const, title: 'Alice' }, unreadCount: 0 },
+            { conversation: { id: 'bob', kind: 'direct' as const, title: 'Bob' }, unreadCount: 0 },
+            { conversation: { id: 'group-1', kind: 'group' as const, title: 'Group 1', selfRole: 'owner' as const, selfPermissions: perms }, unreadCount: 0 },
+            { conversation: { id: 'group-2', kind: 'group' as const, title: 'Group 2' }, unreadCount: 0 },
+            { conversation: { id: 'group-3', kind: 'group' as const, title: 'Group 3' }, unreadCount: 0 },
+            { conversation: { id: 'group-4', kind: 'group' as const, title: 'Group 4' }, unreadCount: 0 },
+          ],
+        }
+      },
+      async getConversationMember(_session, conversation, userId) {
+        if (!(groupMembers[conversation.id] ?? []).includes(userId)) return null
+        return {
+          user: { id: userId, firstName: userId },
+          role: userId === 'me' ? 'owner' as const : 'member' as const,
+          permissions: perms,
+        }
+      },
+      async getConversationMembers(_session, conversation) {
+        const ids = groupMembers[conversation.id] ?? []
+        return {
+          members: ids.map((id) => ({
+            user: { id, firstName: id },
+            role: id === 'me' ? 'owner' as const : 'member' as const,
+            permissions: perms,
+          })),
+          total: ids.length,
+        }
+      },
+      async moderateConversationMember(_session, conversation, userId, action) {
+        if (action.type === 'kick') {
+          groupMembers[conversation.id] = (groupMembers[conversation.id] ?? []).filter((id) => id !== userId)
+        }
+      },
+    }
+
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    })
+
+    for (const groupId of ['group-1', 'group-2', 'group-3', 'group-4']) {
+      await rpc.getChannelParticipants({
+        _: 'channels.getParticipants',
+        channel: { _: 'inputChannel', channelId: rpc.peerTlId(groupId), accessHash: Long.ONE },
+        filter: { _: 'channelParticipantsRecent' },
+        offset: 0, limit: 100, hash: Long.ZERO,
+      })
+    }
+
+    const aliceInput: tl.TypeInputUser = { _: 'inputUser', userId: rpc.peerTlId('alice'), accessHash: Long.ONE }
+    const bobInput: tl.TypeInputUser = { _: 'inputUser', userId: rpc.peerTlId('bob'), accessHash: Long.ONE }
+
+    const selfFull = await rpc.getFullUser({ _: 'users.getFullUser', id: { _: 'inputUserSelf' } })
+    expect(selfFull.fullUser.commonChatsCount).toBe(0)
+    expect(await rpc.getCommonChats({
+      _: 'messages.getCommonChats', userId: { _: 'inputUserSelf' }, maxId: 0, limit: 100,
+    })).toEqual({ _: 'messages.chats', chats: [] })
+
+    expect((await rpc.getFullUser({ _: 'users.getFullUser', id: aliceInput })).fullUser.commonChatsCount).toBe(3)
+    expect((await rpc.getFullUser({ _: 'users.getFullUser', id: bobInput })).fullUser.commonChatsCount).toBe(2)
+
+    const expectedAliceIds = ['group-1', 'group-2', 'group-3']
+      .map((id) => rpc.peerTlId(id))
+      .sort((a, b) => b - a)
+
+    const allAlice = await rpc.getCommonChats({
+      _: 'messages.getCommonChats', userId: aliceInput, maxId: 0, limit: 10,
+    })
+    expect(allAlice._).toBe('messages.chats')
+    expect(allAlice.chats.map((chat) => chat.id)).toEqual(expectedAliceIds)
+
+    const page1 = await rpc.getCommonChats({
+      _: 'messages.getCommonChats', userId: aliceInput, maxId: 0, limit: 2,
+    })
+    expect(page1).toMatchObject({ _: 'messages.chatsSlice', count: 3 })
+    expect(page1.chats.map((chat) => chat.id)).toEqual(expectedAliceIds.slice(0, 2))
+
+    const page2 = await rpc.getCommonChats({
+      _: 'messages.getCommonChats', userId: aliceInput, maxId: page1.chats[1].id, limit: 2,
+    })
+    expect(page2).toMatchObject({ _: 'messages.chatsSlice', count: 3 })
+    expect(page2.chats.map((chat) => chat.id)).toEqual(expectedAliceIds.slice(2))
+
+    const page3 = await rpc.getCommonChats({
+      _: 'messages.getCommonChats', userId: aliceInput, maxId: page2.chats[0].id, limit: 2,
+    })
+    expect(page3).toMatchObject({ _: 'messages.chatsSlice', count: 3, chats: [] })
+
+    await rpc.editChannelBanned({
+      _: 'channels.editBanned',
+      channel: { _: 'inputChannel', channelId: rpc.peerTlId('group-1'), accessHash: Long.ONE },
+      participant: { _: 'inputPeerUser', userId: rpc.peerTlId('alice'), accessHash: Long.ONE },
+      bannedRights: { _: 'chatBannedRights', viewMessages: true, untilDate: 0 },
+    })
+    expect((await rpc.getFullUser({ _: 'users.getFullUser', id: aliceInput })).fullUser.commonChatsCount).toBe(2)
+
+    await expect(rpc.getCommonChats({
+      _: 'messages.getCommonChats',
+      userId: { _: 'inputUser', userId: 999999999, accessHash: Long.ZERO },
+      maxId: 0, limit: 20,
+    })).rejects.toMatchObject({ code: 400, text: 'USER_ID_INVALID' } satisfies Partial<RpcError>)
+    await expect(rpc.getCommonChats({
+      _: 'messages.getCommonChats',
+      userId: { _: 'inputUserEmpty' },
+      maxId: 0, limit: 20,
+    })).rejects.toMatchObject({ code: 400, text: 'USER_ID_INVALID' } satisfies Partial<RpcError>)
+  })
+
+  it('merges optional platform getCommonConversations results and folds subchannels to their parent', async () => {
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: true },
+      },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('unused') },
+      async getHistory() { return { messages: [] } },
+      async getDialogs() {
+        return {
+          dialogs: [
+            { conversation: { id: 'alice', kind: 'direct' as const, title: 'Alice' }, unreadCount: 0 },
+            { conversation: { id: 'guild-1', kind: 'channel' as const, title: 'Guild 1' }, unreadCount: 0 },
+            { conversation: { id: 'topic-1', kind: 'channel' as const, parentId: 'guild-1', title: 'Topic 1' }, unreadCount: 0 },
+          ],
+        }
+      },
+      async getCommonConversations(_session, userId) {
+        return userId === 'alice' ? ['alice', 'topic-1', 'guild-1'] : []
+      },
+    }
+
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    })
+    const aliceInput: tl.TypeInputUser = { _: 'inputUser', userId: rpc.peerTlId('alice'), accessHash: Long.ONE }
+    const full = await rpc.getFullUser({ _: 'users.getFullUser', id: aliceInput })
+    expect(full.fullUser.commonChatsCount).toBe(1)
+
+    const common = await rpc.getCommonChats({
+      _: 'messages.getCommonChats', userId: aliceInput, maxId: 0, limit: 50,
+    })
+    expect(common).toMatchObject({ _: 'messages.chats' })
+    expect(common.chats.map((chat) => chat.id)).toEqual([rpc.peerTlId('guild-1')])
+  })
 })
 
 describe('stableId', () => {

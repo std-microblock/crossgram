@@ -318,6 +318,16 @@ export interface DialogFolderPeerRow {
   updatedAt: Date
 }
 
+export interface ConversationMemberRow {
+  id: number
+  platformSessionId: string
+  platformConversationId: string
+  platformUserId: string
+  /** 成员记录来源：'member-list' 表示来自群成员列表快照，'message' 表示由群消息/入群事件被动观察到。 */
+  source: 'member-list' | 'message'
+  updatedAt: Date
+}
+
 declare module '@cordisjs/plugin-database' {
   interface Tables {
     mtproto_auth_session: AuthSessionRow
@@ -347,6 +357,7 @@ declare module '@cordisjs/plugin-database' {
     mtproto_blocked_peer: BlockedPeerRow
     mtproto_dialog_filter: DialogFilterRow
     mtproto_dialog_folder_peer: DialogFolderPeerRow
+    mtproto_conversation_member: ConversationMemberRow
     mtproto_scheduled_message: ScheduledMessageRow
     mtproto_scheduled_state: ScheduledMessageStateRow
   }
@@ -598,6 +609,20 @@ export function defineModels(ctx: Context): void {
     primary: 'id',
     unique: [['platformSessionId', 'platformConversationId']],
     indexes: [['platformSessionId', 'folderId'], ['platformSessionId', 'pinnedOrder']],
+  })
+
+  ctx.model.extend('mtproto_conversation_member', {
+    id: 'unsigned', platformSessionId: 'string', platformConversationId: 'text',
+    platformUserId: 'text', source: 'string', updatedAt: 'timestamp',
+  }, {
+    primary: 'id', autoInc: true,
+    // 左前缀同时覆盖按会话扫描全部成员（全量对账）。
+    unique: [['platformSessionId', 'platformConversationId', 'platformUserId']],
+    // 覆盖索引：按用户查共同群（users.getFullUser / messages.getCommonChats）直接走 index-only scan。
+    indexes: [{
+      name: 'mtproto_conv_member_user_idx',
+      keys: { platformSessionId: 'asc', platformUserId: 'asc', platformConversationId: 'asc' },
+    }],
   })
 
   ctx.model.extend('mtproto_scheduled_message', {
