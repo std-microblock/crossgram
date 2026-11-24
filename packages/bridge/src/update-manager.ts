@@ -25,6 +25,7 @@ import type { BlockedPeerStore } from './blocked-peers.js'
 import { customReactionDocumentId } from './reaction-rpc.js'
 import { updateFromJson, updateToJson } from './update-json.js'
 import type { MessageProjectionPipeline } from './message-projection.js'
+import type { LinkPreviewService } from './link-preview.js'
 import type { SendEchoes } from './send-echoes.js'
 
 const CHANNEL_POLL_TIMEOUT_SECONDS = 30
@@ -78,6 +79,12 @@ export class UpdateManager {
       definition: IMReactionDefinition,
     ) => number | undefined,
     private readonly _sendEchoes?: SendEchoes,
+    private readonly _linkPreviews?: LinkPreviewService,
+    private readonly _onLinkPreviewReady?: (
+      session: PlatformSession,
+      conversation: IMConversation,
+      message: IMMessage,
+    ) => void,
   ) {}
 
   /** 注册行内自定义表情的 document，使渲染消息的客户端能解析对应资源。 */
@@ -833,6 +840,11 @@ export class UpdateManager {
         }
         const projectedSticker = projectedSource.content.parts.find((item) => item.type === 'sticker')
         const projectedCard = projectedSource.content.parts.find((item) => item.type === 'card')
+        // 与历史投影一致：缓存里已有预览就直接画卡片，否则先挂链接、抓完再补一条编辑事件。
+        const linkPreview = part.ordinal === 0 && this._linkPreviews
+          ? await this._linkPreviews.previewFor(projectedSource, this._dcId, () =>
+              this._onLinkPreviewReady?.(session, event.conversation, projectedSource))
+          : undefined
         const richMessage = draft.richMessage ?? makeTlArticleMedia(
           projectedSource, projected.media, this._dcId, {
             userId: (platformUserId) => requiredUserId(userIds, platformUserId),
@@ -858,7 +870,7 @@ export class UpdateManager {
                 ? this._projectSticker?.(session, projectedSticker.sticker)
                 : projectedCard?.type === 'card'
                   ? makeTlCardPreview(projectedCard.card, this._dcId)
-                  : undefined)),
+                  : linkPreview)),
             entities: draft.entities ?? makeMessageEntities(
               projectedSource, userIds,
               (definition) => this._inlineDocumentId(session, projectedSource.conversationId, definition),

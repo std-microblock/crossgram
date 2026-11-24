@@ -8,7 +8,7 @@ import z from 'schemastery'
 import enUS from './locales/en-US.yml'
 import zhCN from './locales/zh-CN.yml'
 import { RpcError, bareVector, type ServerRpcContext } from '@mtproto-relay/mtproto'
-import type { IMPlatform, PlatformSession } from './platform.js'
+import type { IMMessage, IMPlatform, PlatformSession } from './platform.js'
 import { defineModels } from './models.js'
 import { makeConfig, makeAppConfig, makeUser, parseEndpoint } from './synthetic.js'
 import {
@@ -75,6 +75,7 @@ import { MtprotoBridgeService, type BridgeSessionState } from './bridge-service.
 import { BridgeManagementError, BridgeManagementService } from './management-service.js'
 import { registerGroupFilesMiniApp } from './group-files-miniapp.js'
 import { MessageProjectionPipeline } from './message-projection.js'
+import { LinkPreviewService, linkPreviewEditEventId } from './link-preview.js'
 
 export * from './platform.js'
 export { defineModels } from './models.js'
@@ -162,6 +163,16 @@ export interface BridgeConfig {
   /** Coturn REST 鉴权共享密钥，仅向外派生单次通话的临时凭据。 */
   voiceTurnSharedSecret?: string
   voiceTurnTtlSeconds?: number
+  /** 入站裸链接的 Telegram 卡片预览；默认开启，抓取失败只保留普通链接。 */
+  linkPreview?: {
+    enabled?: boolean
+    thumbnails?: boolean
+    cachePath?: string
+    ttlSeconds?: number
+    timeoutMs?: number
+    maxHtmlBytes?: number
+    maxImageBytes?: number
+  }
   onTransferProgress?: (session: PlatformSession, progress: import('./platform.js').IMTransferProgress) => void | Promise<void>
 }
 
@@ -207,6 +218,23 @@ export const Config = z.object({
   voiceTurnPort: z.natural().min(1).max(65_535).default(3478),
   voiceTurnSharedSecret: z.string().role('secret').default(''),
   voiceTurnTtlSeconds: z.natural().min(60).max(86_400).default(3_600),
+  linkPreview: z.object({
+    enabled: z.boolean().default(true).description('为入站裸链接合成 Telegram 卡片预览'),
+    thumbnails: z.boolean().default(true).description('下载并缓存页面缩略图'),
+    cachePath: z.string().default('data/bridge-link-preview').description('预览缓存目录，留空表示只用内存'),
+    ttlSeconds: z.natural().min(60).max(31_536_000).default(604_800).description('预览缓存有效期（秒）'),
+    timeoutMs: z.natural().min(500).max(30_000).default(8_000).description('单次抓取超时（毫秒）'),
+    maxHtmlBytes: z.natural().min(4_096).max(4_194_304).default(524_288).description('HTML 大小上限（字节）'),
+    maxImageBytes: z.natural().min(4_096).max(16_777_216).default(2_097_152).description('缩略图大小上限（字节）'),
+  }).description('链接预览').default({
+    enabled: true,
+    thumbnails: true,
+    cachePath: 'data/bridge-link-preview',
+    ttlSeconds: 604_800,
+    timeoutMs: 8_000,
+    maxHtmlBytes: 524_288,
+    maxImageBytes: 2_097_152,
+  }),
 }).i18n({
   'en-US': enUS,
   'zh-CN': zhCN,
@@ -351,6 +379,19 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     }
   }, 'mtproto-bridge.member-sync')
   const uploads = new UploadManager(resolve(config.uploadPath ?? 'data/bridge-uploads'))
+  // 链接预览的抓取、缩略图缓存和 SSRF 防护都在这个服务里；缓存目录留空表示只用内存。
+  const linkPreviewConfig = config.linkPreview ?? {}
+  const linkPreviews = new LinkPreviewService({
+    enabled: linkPreviewConfig.enabled ?? true,
+    thumbnails: linkPreviewConfig.thumbnails ?? true,
+    cachePath: linkPreviewConfig.cachePath === ''
+      ? ''
+      : resolve(linkPreviewConfig.cachePath ?? 'data/bridge-link-preview'),
+    ttlSeconds: linkPreviewConfig.ttlSeconds,
+    timeoutMs: linkPreviewConfig.timeoutMs,
+    maxHtmlBytes: linkPreviewConfig.maxHtmlBytes,
+    maxImageBytes: linkPreviewConfig.maxImageBytes,
+  })
   const stickerRpcs = new Map<string, { platform: IMPlatform, rpc: StickerRpc }>()
   const reactionRpcs = new Map<string, { platform: IMPlatform, rpc: ReactionRpc }>()
   const stickerRpcFor = (platform: IMPlatform, session: PlatformSession): StickerRpc => {
@@ -386,6 +427,27 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (session, conversationId, definition) => reactionRpcFor(registry.require(session.platformId), session)
       .registerInlineCustomEmoji(conversationId, definition),
     sendEchoes,
+    linkPreviews,
+    (session, conversation, message) => {
+      // 预览抓取完成：内容没变，只是重画同一条消息，因此强制投递这条本地编辑。
+      // 抓取期间消息可能已被删除，此时不能再把它写回库里。
+      const publish = (source: IMMessage): void => {
+        void subscriptions.ingestLocalEvent(session, {
+          type: 'message-edit',
+          eventId: linkPreviewEditEventId(source.conversationId, source.id),
+          conversation,
+          message: source,
+        }, { forceDelivery: true }).catch((error: unknown) => bridgeLogger.warn(
+          'link preview update failed conversation=%s message=%s error=%s',
+          source.conversationId, source.id, String(error),
+        ))
+      }
+      void store.findProjectedByPlatformId(session.platformSessionId, conversation.id, message.id)
+        .then((stored) => {
+          if (stored) publish(stored.source)
+        })
+        .catch(() => undefined)
+    },
   )
   /**
    * 「最近使用回应」是账号级数据：发起写入的连接已经在 RPC 结果里拿到 updateRecentReactions，
@@ -560,6 +622,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     scheduledStore,
     () => { void scheduledDispatcher?.rescan() },
     conversationMembers,
+    linkPreviews,
   )
   const requireBridgeSession: typeof resolveBridgeSession = async (rpcContext, ...rest) => {
     const state = await resolveBridgeSession(rpcContext, ...rest)
@@ -1679,6 +1742,7 @@ export function createSessionResolver(
   scheduled?: ScheduledMessageStore,
   onScheduledChange?: () => void,
   conversationMembers?: ConversationMemberStore,
+  linkPreviews?: LinkPreviewService,
 ) {
   const projection = messageProjection ?? new MessageProjectionPipeline(ctx)
   const loading = new Map<string, Promise<BridgeSessionState>>()
@@ -1753,6 +1817,7 @@ export function createSessionResolver(
       scheduled,
       onScheduledChange,
       conversationMembers,
+      linkPreviews,
     })
     return state
   }

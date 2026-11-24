@@ -37,6 +37,7 @@ import type { TelegramResourceService } from './resource-provider.js'
 import { probeImageDimensions } from './image-dimensions.js'
 import { withAutoLinkEntities } from './message-entities.js'
 import { getCardThumbnailFile, makeCardThumbnailPhoto, storageFileType } from './card-thumbnail.js'
+import { getLinkPreviewPhotoFile, linkPreviewEditEventId, type LinkPreviewService } from './link-preview.js'
 import type { DraftStore, StoredDraft } from './draft-store.js'
 import type { ScheduledMessage, ScheduledMessageStore } from './scheduled-messages.js'
 import { MUTE_FOREVER, type NotificationSettingsStore, type NotificationTarget } from './notification-settings.js'
@@ -285,6 +286,8 @@ export interface DialogRpcOptions {
   scheduled?: ScheduledMessageStore
   onScheduledChange?: () => void
   conversationMembers?: ConversationMemberStore
+  /** Builds Telegram link previews for messages whose text carries a bare URL. */
+  linkPreviews?: LinkPreviewService
 }
 
 export class DialogRpc {
@@ -359,6 +362,7 @@ export class DialogRpc {
   private readonly _scheduled?: ScheduledMessageStore
   private readonly _onScheduledChange?: () => void
   private readonly _conversationMembers?: ConversationMemberStore
+  private readonly _linkPreviews?: LinkPreviewService
 
   constructor(
     private readonly _platform: IMPlatform<any>,
@@ -371,7 +375,7 @@ export class DialogRpc {
       onLocalEvent, authKeyId, onTrace, drafts, onDraftUpdate,
       notificationSettings, authenticatedSelfId, blockedPeers, dialogFolders,
       systemPeers, messageProjection, sendEchoes, scheduled, onScheduledChange,
-      conversationMembers,
+      conversationMembers, linkPreviews,
     } = options
     this._uploads = uploads
     this._onTransferProgress = onTransferProgress
@@ -394,6 +398,7 @@ export class DialogRpc {
     this._scheduled = scheduled
     this._onScheduledChange = onScheduledChange
     this._conversationMembers = conversationMembers
+    this._linkPreviews = linkPreviews
     this._actions = new PlatformMessageActions(_platform, _session)
     // 有 `MessageStore` 时淘汰旧条目并由数据库兜底；无存储模式不可淘汰，避免重用已分配的 ID。
     const messageIndexLimit = store ? MAX_CACHED_MESSAGE_INDEX_ENTRIES : Number.POSITIVE_INFINITY
@@ -3249,7 +3254,9 @@ export class DialogRpc {
       throw new RpcError(400, 'LOCATION_INVALID')
     }
     if (req.location._ === 'inputPhotoFileLocation') {
+      // 合成照片有两种来源：QQ 卡片缩略图按需回源，链接预览缩略图来自本地缓存。
       const thumbnail = await getCardThumbnailFile(req.location, offset, req.limit)
+        ?? await getLinkPreviewPhotoFile(req.location, offset, req.limit)
       if (thumbnail) return {
         _: 'upload.file', type: storageFileType(thumbnail.mimeType),
         mtime: Math.floor(Date.now() / 1000), bytes: thumbnail.bytes,
@@ -5312,6 +5319,48 @@ export class DialogRpc {
     return (await this._projectMessages([item])).messages[0]!
   }
 
+  /**
+   * Republishes a message once its link preview finished fetching. Nothing in
+   * the message itself changed: the edit exists so every client redraws it with
+   * the card Telegram would have generated on its own.
+   */
+  private _publishLinkPreview(source: IMMessage): void {
+    const onLocalEvent = this._onLocalEvent
+    if (!onLocalEvent) return
+    const conversation = this._conversations.get(source.conversationId)
+    if (!conversation) return
+    if (this._store) {
+      // 抓取期间消息可能已被撤回或删除，此时不能再把它写回来。
+      void this._store.findProjectedByPlatformId(
+        this._session.platformSessionId, source.conversationId, source.id,
+      ).then((stored) => {
+        if (stored) this._emitLinkPreviewEdit(onLocalEvent, conversation, stored.source)
+      }).catch(() => undefined)
+      return
+    }
+    this._emitLinkPreviewEdit(onLocalEvent, conversation, source)
+  }
+
+  private _emitLinkPreviewEdit(
+    onLocalEvent: NonNullable<DialogRpcOptions['onLocalEvent']>,
+    conversation: IMConversation,
+    source: IMMessage,
+  ): void {
+    void onLocalEvent(
+      this._session,
+      {
+        type: 'message-edit',
+        eventId: linkPreviewEditEventId(source.conversationId, source.id),
+        conversation,
+        message: source,
+      },
+      { forceDelivery: true },
+    ).catch((error: unknown) => this._onTrace?.(
+      'link preview update failed conversation=%s message=%s error=%s',
+      source.conversationId, source.id, String(error),
+    ))
+  }
+
   private async _makeMessage(
     item: MaterializedMessage,
   ): Promise<import('./message-projection.js').MessageProjectionResult> {
@@ -5326,6 +5375,11 @@ export class DialogRpc {
     }
     // 入群系统消息涉及的成员可能从未发过言，需先落库分配 Telegram 用户 ID。
     await this._resolveServiceMembers(source)
+    // 链接预览是合成媒体，不从消息里读：缓存命中时直接画卡片，否则先挂普通链接、
+    // 抓取完成后用一条本地编辑事件补上（与 Telegram 服务端生成预览的时序一致）。
+    const linkPreview = item.ordinal === 0
+      ? await this._linkPreviews?.previewFor(source, this._dcId, () => this._publishLinkPreview(source))
+      : undefined
     const fallback = () => {
       const projectedSource = draft.source as IMMessage
       const sticker = projectedSource.content.parts.find((part) => part.type === 'sticker')
@@ -5360,7 +5414,7 @@ export class DialogRpc {
               ? this._stickers?.makeMessageMedia(sticker.sticker)
               : card?.type === 'card'
                 ? makeTlCardPreview(card.card, this._dcId)
-                : undefined)),
+                : linkPreview)),
           entities: draft.entities ?? (item.ordinal === 0 ? this._messageEntities(projectedSource) : undefined),
           reactions: projectedSource.reactionContext?.reactions.length
             ? this._reactions?.messageReactions(

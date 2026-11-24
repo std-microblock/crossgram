@@ -76,6 +76,15 @@ interface IMConversation<L = unknown> {
 
 > **QQ 灰条特例**：QQ 灰条与伴随的普通消息共用同一个 `msgSeq`。Bridge 会将指向灰条的回复重定向到同序号的正文消息，且删除灰条时仅在本地隐藏，绝不向 QQ 发起撤回请求（避免误撤回同序号的正文消息）。
 
+### 4.3 链接预览（web page）
+
+Telegram 的链接预览本来由服务端抓取生成；Bridge 自己就是服务端，因此由 Bridge 合成：正文里第一条裸 `http(s)` 链接会被异步抓取（OpenGraph / Twitter card / `<title>`），缩略图落在 `linkPreview.cachePath`（默认 `data/bridge-link-preview`），再投影成 `messageMediaWebPage`（`manual` 卡片，与 QQ ark 卡片同一条路）。
+
+- 抓取不在投影路径上：消息先以普通链接投递，抓取完成后补一条 `message-edit`（`eventId = link-preview:<会话>:<消息>`，`forceDelivery`）让客户端重画同一条消息。
+- 防护：只允许 http/https，解析后拒绝回环、RFC1918、CGNAT、link-local、私网 IPv6 与内网域名；超时、HTML 与图片大小上限、并发与缓存 TTL 都可配置；失败只留普通链接，并短暂负缓存避免重试风暴。
+- QQ ark / 小程序 / 合并转发卡片本身已经带预览，不再重复抓取；`messages.getWebPagePreview`（客户端输入框预览）未实现。
+- 反方向（Telegram → QQ）不需要处理：QQ 服务端自己给链接出卡片。
+
 ## 5. 历史分页与已读同步
 
 - `getDialogs()` 与 `getHistory()` 每次调用只返回一页数据，严禁在单次调用内自动循环拉取后续游标。
