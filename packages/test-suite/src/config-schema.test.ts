@@ -21,8 +21,9 @@ import { Config as memoryUpdateStoreConfig } from '../../update-store-memory/src
 const cases = [
   ['bridge', bridgeConfig, [
     'dcId', 'serverHost', 'serverPort', 'altEndpoints', 'apiPrefix', 'groupFilesMiniApp', 'uploadPath', 'autoMuteGroupChats',
-    'blockedContentMode', 'recalledMessageMode', 'voiceWorkerSocketPath', 'voiceWorkerTimeoutMs', 'voiceDirectIce',
-    'voiceTurnHost', 'voiceTurnPort', 'voiceTurnSharedSecret', 'voiceTurnTtlSeconds',
+    'blockedContentMode', 'recalledMessageMode', 'memberSyncEnabled', 'voiceWorkerSocketPath',
+    'voiceWorkerTimeoutMs', 'voiceDirectIce', 'voiceTurnHost', 'voiceTurnPort', 'voiceTurnSharedSecret',
+    'voiceTurnTtlSeconds', 'linkPreview',
   ]],
   ['debug', debugConfig, [
     'maxEvents', 'initiallyPaused', 'apiPath',
@@ -99,6 +100,7 @@ describe('plugin config schemas', () => {
       autoMuteGroupChats: true,
       blockedContentMode: 'hide-user',
       recalledMessageMode: 'show',
+      memberSyncEnabled: true,
       voiceWorkerSocketPath: '',
       voiceWorkerTimeoutMs: 5_000,
       voiceDirectIce: true,
@@ -106,6 +108,15 @@ describe('plugin config schemas', () => {
       voiceTurnPort: 3478,
       voiceTurnSharedSecret: '',
       voiceTurnTtlSeconds: 3_600,
+      linkPreview: {
+        enabled: true,
+        thumbnails: true,
+        cachePath: 'data/bridge-link-preview',
+        ttlSeconds: 604_800,
+        timeoutMs: 8_000,
+        maxHtmlBytes: 524_288,
+        maxImageBytes: 2_097_152,
+      },
     })
     expect(exporterConfig({ platformId: 'qqnt', platform: 'qq' })).toEqual({
       platformId: 'qqnt',

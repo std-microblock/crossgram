@@ -84,3 +84,13 @@ function validRange(range: EntityRange): boolean {
 function overlaps(left: EntityRange, right: EntityRange): boolean {
   return left.offset < right.offset + right.length && right.offset < left.offset + left.length
 }
+
+/**
+ * Every link the linkifier recognises in plain text, in reading order and with
+ * a scheme (`example.com` becomes `http://example.com`). Features which need
+ * the URL itself — the link preview scraper — read it from here so the card and
+ * the blue link always agree on what counts as a link.
+ */
+export function findTextUrls(text: string): string[] {
+  return (LINKIFIER.match(text) ?? []).map((match) => match.url)
+}
