@@ -1797,6 +1797,101 @@ describe('QQNTPlatform mapping', () => {
     )
   })
 
+  it('re-sends a forwarded voice instead of letting QQ flatten it into a text note', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.forwardMessages = vi.fn()
+    platform.client.getMessage = vi.fn()
+    // QQ's native forward turns the recording into the text it renders for a
+    // voice message ("[语音] 1'20\""), so the adapter must re-send the source.
+    platform.client.sendMessage = vi.fn(async (_conversation, parts) => ({
+      id: 'resent-voice', conversationId: 'to', senderId: 'self', timestamp: 2, outgoing: true,
+      parts: parts.flatMap((part) => part.type === 'media' ? [{
+        type: 'media' as const,
+        media: {
+          id: 'resent-voice:ptt', kind: part.media.kind, name: part.media.name,
+          mimeType: part.media.mimeType, duration: part.media.duration, voice: part.media.voice,
+          locator: {
+            messageId: 'resent-voice', elementId: 'ptt', chatType: 2 as const, peerUid: 'to',
+            kind: 'voice' as const, fileName: 'voice.ogg',
+          },
+        },
+      }] : []),
+    }))
+
+    const outputs = await platform.forwardMessages(
+      session, { id: 'from' }, ['qq-voice'], { id: 'to' },
+      {
+        sourceMessages: [{
+          id: 'stored-voice', conversationId: 'from', senderId: 'alice', timestamp: 1,
+          content: { parts: [{
+            type: 'media' as const,
+            media: {
+              id: 'ptt:original-v1', kind: 'file' as const, name: 'voice.ogg',
+              mimeType: 'audio/ogg', size: 42, duration: 80, voice: true,
+              locator: {
+                messageId: 'stored-voice', elementId: 'ptt', chatType: 1 as const,
+                peerUid: 'alice', kind: 'voice' as const, fileName: 'voice.ogg',
+              },
+            },
+          }] },
+        }],
+      },
+    )
+
+    expect(platform.client.forwardMessages).not.toHaveBeenCalled()
+    expect(platform.client.getMessage).not.toHaveBeenCalled()
+    expect(platform.client.sendMessage).toHaveBeenCalledWith(
+      'to',
+      [{ type: 'media', media: expect.objectContaining({ voice: true, duration: 80 }) }],
+      expect.anything(), expect.anything(),
+    )
+    expect(outputs).toMatchObject([{
+      id: 'resent-voice',
+      content: { parts: [{ type: 'media', media: { voice: true } }] },
+    }])
+  })
+
+  it('keeps the native forward for a batch of messages that contains a voice', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.forwardMessages = vi.fn(async () => [{
+      id: 'merged', conversationId: 'to', senderId: 'self', timestamp: 2, outgoing: true,
+      parts: [{ type: 'text' as const, text: '查看聊天记录' }],
+    }])
+    platform.client.sendMessage = vi.fn()
+
+    const [merged] = await platform.forwardMessages(
+      session, { id: 'from' }, ['qq-text', 'qq-voice'], { id: 'to' },
+      {
+        sourceMessages: [
+          {
+            id: 'stored-text', conversationId: 'from', senderId: 'alice', timestamp: 1,
+            content: { parts: [{ type: 'text', text: 'hello' }] },
+          },
+          {
+            id: 'stored-voice', conversationId: 'from', senderId: 'alice', timestamp: 1,
+            content: { parts: [{
+              type: 'media' as const,
+              media: {
+                id: 'ptt:original-v1', kind: 'file' as const, name: 'voice.ogg',
+                mimeType: 'audio/ogg', size: 42, duration: 80, voice: true,
+                locator: {
+                  messageId: 'stored-voice', elementId: 'ptt', chatType: 1 as const,
+                  peerUid: 'alice', kind: 'voice' as const, fileName: 'voice.ogg',
+                },
+              },
+            }] },
+          },
+        ],
+      },
+    )
+
+    expect(platform.client.forwardMessages).toHaveBeenCalledWith(
+      'from', ['qq-text', 'qq-voice'], 'to', true, expect.any(String),
+    )
+    expect(platform.client.sendMessage).not.toHaveBeenCalled()
+    expect(merged.id).toBe('merged')
+  })
+
   it('projects inline QQ faces as Telegram custom emoji data and restores their face index', async () => {
     const platform = new QQNTPlatform()
     const png = await sharp({

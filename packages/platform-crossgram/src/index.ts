@@ -1465,7 +1465,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     options: import('@mtproto-relay/bridge').IMForwardMessagesOptions = {},
   ): Promise<IMMessage<QQMediaLocator>[]> {
     if (!messageIds.length) return []
-    if (options.dropAuthor) {
+    // QQ's native forward drops the recording and leaves the text it renders for
+    // a voice message ("[语音] 1'20\"") in the destination chat, so a single
+    // forwarded voice is re-sent from the authorized source instead.
+    if (options.dropAuthor
+      || (messageIds.length === 1 && sourceCarriesVoice(options.sourceMessages?.[0]))) {
       return this.copyForwardedMessages(session, from, messageIds, to, options)
     }
     const merged = messageIds.length > 1
@@ -3527,6 +3531,12 @@ function needsUserAvatarRefresh(media: IMMedia<QQMediaLocator>, locator: QQMedia
 function isNativeForwardRejection(error: unknown): boolean {
   return error instanceof Error
     && /^QQNT bridge 500: (?:forwardMsg|multiForwardMsg):/.test(error.message)
+}
+
+/** True when a stored source message carries a recorded voice note. */
+function sourceCarriesVoice(message: IMMessage<any> | undefined): boolean {
+  return message?.content.parts.some((part) =>
+    part.type === 'media' && part.media.voice === true) === true
 }
 
 function dialogPageCacheKey(platformSessionId: string, query: IMPageQuery): string {
