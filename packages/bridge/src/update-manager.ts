@@ -5,8 +5,8 @@ import type { ServerConnection, ServerRpcContext } from '@mtproto-relay/mtproto'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
-  makeAdminRights, makeDefaultBannedRights, makeTlArticleMedia, makeTlCardPreview, makeTlMarkdownArticle,
-  makeTlMessageMedia, peerTlSeed, projectTlMessage, stableId,
+  demoteStickerMedia, makeAdminRights, makeDefaultBannedRights, makeTlArticleMedia, makeTlCardPreview,
+  makeTlMarkdownArticle, makeTlMessageMedia, peerTlSeed, projectTlMessage, stableId, stickerSharesMessage,
 } from './dialogs.js'
 import { toUser, type MessageStore } from './message-store.js'
 import {
@@ -855,7 +855,12 @@ export class UpdateManager {
             media: richMessage ? undefined : (draft.media ?? (media
               ? makeTlMessageMedia(media, projectedSource.timestamp, this._dcId)
               : projectedSticker?.type === 'sticker'
-                ? this._projectSticker?.(session, projectedSticker.sticker)
+                ? (stickerSharesMessage(projectedSource)
+                    ? demoteStickerMedia(
+                        this._projectSticker?.(session, projectedSticker.sticker),
+                        projectedSticker.sticker.title || `${projectedSticker.sticker.stickerId}.png`,
+                      )
+                    : this._projectSticker?.(session, projectedSticker.sticker))
                 : projectedCard?.type === 'card'
                   ? makeTlCardPreview(projectedCard.card, this._dcId)
                   : undefined)),
