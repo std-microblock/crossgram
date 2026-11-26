@@ -5357,7 +5357,12 @@ export class DialogRpc {
           media: richMessage ? undefined : (draft.media ?? (item.media
             ? makeTlMessageMedia(item.media, projectedSource.timestamp, this._dcId)
             : sticker?.type === 'sticker'
-              ? this._stickers?.makeMessageMedia(sticker.sticker)
+              ? (stickerSharesMessage(projectedSource)
+                  ? demoteStickerMedia(
+                      this._stickers?.makeMessageMedia(sticker.sticker),
+                      sticker.sticker.title || `${sticker.sticker.stickerId}.png`,
+                    )
+                  : this._stickers?.makeMessageMedia(sticker.sticker))
               : card?.type === 'card'
                 ? makeTlCardPreview(card.card, this._dcId)
                 : undefined)),
@@ -7070,6 +7075,41 @@ export function makeTlCardPreview(
       photo: makeCardThumbnailPhoto(card.thumbnailUrl, dcId),
     },
   }
+}
+
+/**
+ * Telegram clients never lay out a caption on a sticker message: the Android
+ * message cell measures a sticker's own geometry and skips the caption layout
+ * entirely, so the `message` text such a record carries is never painted.
+ *
+ * QQ pairs a big face (`faceType` 3/4, the "大表情" family) with the rest of
+ * the bubble, and the adapter hands every one of those faces over as its own
+ * sticker part. A message that also carries text or another attachment is
+ * therefore projected with the sticker demoted to an ordinary document, which
+ * does keep its caption; a sticker that is the whole message stays a sticker.
+ */
+export function demoteStickerMedia(
+  media: tl.TypeMessageMedia | undefined,
+  fileName?: string,
+): tl.TypeMessageMedia | undefined {
+  if (media?._ !== 'messageMediaDocument') return media
+  const document = media.document
+  if (document?._ !== 'document') return media
+  const attributes = document.attributes ?? []
+  if (!attributes.some((attribute) => attribute._ === 'documentAttributeSticker')) return media
+  const demoted = attributes.filter((attribute) => attribute._ !== 'documentAttributeSticker')
+  // The sticker attribute is what makes clients skip the caption; the file
+  // name only keeps the resulting document bubble readable.
+  if (fileName && !demoted.some((attribute) => attribute._ === 'documentAttributeFilename')) {
+    demoted.push({ _: 'documentAttributeFilename', fileName })
+  }
+  return { ...media, document: { ...document, attributes: demoted } }
+}
+
+/** True when a sticker part shares its message with text or another part. */
+export function stickerSharesMessage(source: IMProjectableMessage): boolean {
+  const parts = source.content.parts
+  return parts.length > 1 && parts.some((part) => part.type === 'sticker')
 }
 
 export function projectTlMessage(options: {

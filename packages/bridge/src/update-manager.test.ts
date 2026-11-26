@@ -1664,6 +1664,45 @@ describe('UpdateManager', () => {
     expect((update.message as tl.RawMessage).media?._).toBe('messageMediaDocument')
   })
 
+  it('demotes a companion sticker so the message text stays visible in Telegram', async () => {
+    // Telegram clients lay out no caption on a sticker message, and QQ sends a
+    // big face (`大表情`) as its own sticker part beside the bubble's text.
+    const stickerMedia = {
+      _: 'messageMediaDocument',
+      document: {
+        _: 'document', id: 43 as never, accessHash: 43 as never, fileReference: new Uint8Array(),
+        date: 1, mimeType: 'image/apng', size: 128, dcId: 1,
+        attributes: [
+          { _: 'documentAttributeSticker', alt: '', stickerset: { _: 'inputStickerSetEmpty' } },
+          { _: 'documentAttributeImageSize', w: 240, h: 240 },
+        ],
+      },
+    } as tl.TypeMessageMedia
+    const { store, manager, sent } = await createHarness(undefined, platform, () => stickerMedia)
+    const conversation: IMConversation = { id: 'face-and-text', kind: 'group', title: 'Faces' }
+    const message: IMMessage = {
+      id: 'face-with-text', conversationId: conversation.id, senderId: 'alice', timestamp: 21,
+      content: {
+        parts: [
+          { type: 'sticker', sticker: {
+            providerId: 'qq', stickerId: 'sysface:476', format: 'animated', mimeType: 'image/apng',
+          } },
+          { type: 'text', text: '挂的啥科室' },
+        ],
+      },
+    }
+    const result = await store.ingest(session, conversation, message)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    const update = (sent[0].update as tl.RawUpdates).updates[0] as tl.RawUpdateNewChannelMessage
+    const projected = update.message as tl.RawMessage
+    expect(projected.message).toBe('挂的啥科室')
+    const document = (projected.media as tl.RawMessageMediaDocument).document as tl.RawDocument
+    expect(document.attributes.map((attribute) => attribute._)).toEqual([
+      'documentAttributeImageSize', 'documentAttributeFilename',
+    ])
+  })
+
   it('backfills an uncached reply target before publishing the live reply', async () => {
     const conversation: IMConversation = { id: 'reply-group', kind: 'group', title: 'Replies' }
     const target: IMMessage = {

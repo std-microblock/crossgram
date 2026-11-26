@@ -9,7 +9,10 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
-import { DialogRpc, makeTlArticleMedia, makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
+import {
+  demoteStickerMedia, DialogRpc, makeTlArticleMedia, makeTlMessageMedia, projectTlMessage, stableId,
+  stickerSharesMessage,
+} from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { ReactionRpc } from './reaction-rpc.js'
@@ -111,6 +114,46 @@ it('keeps ordinary messages at the existing notification default', () => {
   })
   expect(projected).toMatchObject({ _: 'message', id: 7, message: 'regular message' })
   expect(projected).not.toHaveProperty('silent')
+})
+
+it('demotes a sticker that shares its message so the caption stays visible', () => {
+  const media: tl.TypeMessageMedia = {
+    _: 'messageMediaDocument',
+    document: {
+      _: 'document', id: 7 as never, accessHash: 7 as never, fileReference: new Uint8Array(),
+      date: 1, mimeType: 'image/apng', size: 64, dcId: 1,
+      attributes: [
+        { _: 'documentAttributeSticker', alt: '', stickerset: { _: 'inputStickerSetEmpty' } },
+        { _: 'documentAttributeImageSize', w: 240, h: 240 },
+      ],
+    },
+  }
+  // A sticker alone stays a sticker.
+  expect(demoteStickerMedia(media, '微笑.png')).toMatchObject({
+    _: 'messageMediaDocument',
+    document: {
+      attributes: [
+        { _: 'documentAttributeImageSize' },
+        { _: 'documentAttributeFilename', fileName: '微笑.png' },
+      ],
+    },
+  })
+  const shared: IMMessage = {
+    id: 'face-with-text', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_009,
+    content: {
+      parts: [
+        { type: 'sticker', sticker: {
+          providerId: 'qq', stickerId: 'sysface:476', format: 'animated', mimeType: 'image/apng',
+        } },
+        { type: 'text', text: '挂的啥科室' },
+      ],
+    },
+  }
+  expect(stickerSharesMessage(shared)).toBe(true)
+  expect(stickerSharesMessage({
+    id: 'face-only', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_010,
+    content: { parts: [shared.content.parts[0]!] },
+  })).toBe(false)
 })
 
 it('projects a conversation-scoped sender title as a Telegram member tag', () => {
