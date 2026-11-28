@@ -5339,7 +5339,7 @@ export class DialogRpc {
             return reaction._ === 'reactionCustomEmoji' ? reaction.documentId.toNumber() : undefined
           } : undefined,
         },
-      ) ?? makeTlMarkdownArticle(projectedSource)
+      ) ?? makeTlMarkdownArticle(projectedSource, this._dcId)
       return {
         message: projectTlMessage({
           platformSessionId: this._session.platformSessionId,
@@ -7379,9 +7379,15 @@ export interface TlArticleProjectionOptions {
  * failure is the one fallback left — the message then goes out as its styled
  * text rather than not at all.
  */
-export function makeTlMarkdownArticle(source: IMProjectableMessage): tl.RawRichMessage | undefined {
+export function makeTlMarkdownArticle(
+  source: IMProjectableMessage,
+  dcId = 1,
+): tl.RawRichMessage | undefined {
   const markdown = source.content.richMarkdown
-  return markdown ? markdownRichMessage(markdown) : undefined
+  if (!markdown) return undefined
+  return markdownRichMessage(markdown, {
+    resolveImage: (target, _alt, dimensions) => makeCardThumbnailPhoto(target, dcId, dimensions),
+  })
 }
 
 export function makeTlArticleMedia(

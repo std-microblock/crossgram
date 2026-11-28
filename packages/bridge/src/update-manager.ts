@@ -840,7 +840,7 @@ export class UpdateManager {
               session, projectedSource.conversationId, definition,
             ),
           },
-        ) ?? makeTlMarkdownArticle(projectedSource)
+        ) ?? makeTlMarkdownArticle(projectedSource, this._dcId)
         return {
           message: projectTlMessage({
             platformSessionId: session.platformSessionId,

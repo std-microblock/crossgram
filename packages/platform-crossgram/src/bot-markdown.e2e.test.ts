@@ -1,6 +1,6 @@
 import { once } from 'node:events'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -396,5 +396,131 @@ describe('QQNT bot markdown E2E', () => {
       // the message's trailing-trim then clips: the reader sees the code line.
       'messageEntityPre:const a = 1',
     ])
+  })
+
+  it('embeds QQ bot markdown images as richMessage photos and serves them via upload.getFile', async () => {
+    const imageUrl = 'https://qqbot.ugcimg.cn/1906562192/qqbot-media/preview-test.png'
+    const imageBytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4])
+    const markdown = [
+      '**📄 第10章作业** · 第 1 版',
+      '离散数学 · 学习通 · 1题 · 草稿 `#13`',
+      '',
+      '> 💬 回复本图提修改意见，确认无误点下方提交',
+      '',
+      `![preview #922px #2875px](${imageUrl})`,
+      '',
+      '审核：[@MicroBlock](mqqapi://markdown/mention?at_type=1&at_tinyid=1715311957)',
+    ].join('\n')
+    const markdownMessage = {
+      id: 'qq-bot-inline-image', conversationId: 'img-group', senderId: 'bot', timestamp: 1_800_000_400,
+      outgoing: false, msgSeq: '405', telegramMessageId: 405,
+      sender: { id: 'bot', name: '作业助手', numericId: '1906562192', bot: true },
+      parts: [
+        { type: 'markdown', content: markdown },
+        // QQ's plain-text fallback omits embedded images and mention targets.
+        {
+          type: 'text',
+          text: '📄 第10章作业 · 第 1 版\n离散数学 · 学习通 · 1题 · 草稿 #13\n> 💬 回复本图提修改意见，确认无误点下方提交\n审核：',
+        },
+      ],
+    }
+    const server: Server = createServer(async (request, response) => {
+      response.setHeader('content-type', 'application/json')
+      const url = request.url ?? ''
+      if (url.startsWith('/v1/conversations/img-group/history')) {
+        response.end(JSON.stringify({ messages: [markdownMessage] }))
+        return
+      }
+      if (url.startsWith('/v1/dialogs')) {
+        response.end(JSON.stringify({ conversations: [{
+          id: 'img-group', kind: 'group', title: 'img-group',
+          peerUid: 'img-group', peerUin: 'img-group', chatType: 2, unreadCount: 0,
+        }] }))
+        return
+      }
+      if (url === '/v1/reactions/catalog') {
+        response.end(JSON.stringify({ available: [], reactions: [], maxSelected: 20 }))
+        return
+      }
+      response.statusCode = 404
+      response.end(JSON.stringify({ error: 'not found' }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing test server address')
+    disposals.push(async () => {
+      const closed = new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+      server.closeAllConnections()
+      await closed
+    })
+
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const platform = new QQNTPlatform({ endpoint: `http://127.0.0.1:${address.port}/v1` })
+    const store = new MessageStore(ctx.database)
+    const conversation = { id: 'img-group', kind: 'group' as const, title: 'img-group' }
+    const [message] = (await platform.getHistory(session, conversation)).messages
+    await store.ingest(session, conversation, message!, { allocation: 'history' })
+
+    const rpc = new DialogRpc(platform, session, store)
+    const peer = { _: 'inputPeerChannel' as const, channelId: rpc.peerTlId('img-group'), accessHash: Long.ZERO }
+    const result = await rpc.getHistory({
+      _: 'messages.getHistory', peer: peer as tl.TypeInputPeer, offsetId: 0, offsetDate: 0,
+      addOffset: 0, limit: 20, maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawChannelMessages
+    const projected = result.messages.find((item): item is tl.RawMessage => item._ === 'message')!
+
+    // Plain-text fallback is deduplicated even though it omits the image alt text.
+    expect(projected.message.split('第10章作业')).toHaveLength(2)
+    expect(projected.richMessage?.blocks.map((block) => block._)).toEqual([
+      'pageBlockParagraph',
+      'pageBlockBlockquote',
+      'pageBlockPhoto',
+      'pageBlockParagraph',
+    ])
+    const photoBlock = projected.richMessage?.blocks[2] as tl.RawPageBlockPhoto
+    const photo = projected.richMessage?.photos[0] as tl.RawPhoto
+    expect(photo).toBeDefined()
+    expect(photoBlock.photoId.equals(photo.id)).toBe(true)
+    expect(photo.sizes).toEqual([
+      { _: 'photoSize', type: 'y', w: 410, h: 1280, size: 0 },
+      { _: 'photoSize', type: 'w', w: 922, h: 2875, size: 0 },
+    ])
+
+    const originalFetch = globalThis.fetch
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const target = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (target === imageUrl) {
+        return new Response(imageBytes, {
+          headers: { 'content-type': 'image/png', 'content-length': String(imageBytes.length) },
+        })
+      }
+      return originalFetch(input, init)
+    })
+    disposals.push(async () => { fetchMock.mockRestore() })
+
+    const file = await rpc.getFile({
+      _: 'upload.getFile',
+      location: {
+        _: 'inputPhotoFileLocation',
+        id: photo.id,
+        accessHash: photo.accessHash,
+        fileReference: photo.fileReference,
+        thumbSize: 'y',
+      },
+      offset: 0,
+      limit: 64,
+    }) as tl.upload.RawFile
+    expect(file.type).toEqual({ _: 'storage.filePng' })
+    expect(file.bytes).toEqual(imageBytes)
   })
 })

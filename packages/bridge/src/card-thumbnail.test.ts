@@ -39,4 +39,22 @@ describe('card thumbnail projection', () => {
       fileReference: photo.fileReference, thumbSize: 'x',
     }, 0, 10)).rejects.toThrow('not an image')
   })
+
+  it('projects explicit dimensions and adds a 1280px display tier for tall images', () => {
+    const medium = makeCardThumbnailPhoto('https://images.example.com/tarot.png', 2, { width: 356, height: 600 })
+    expect(medium?.sizes).toEqual([
+      { _: 'photoSize', type: 'x', w: 356, h: 600, size: 0 },
+    ])
+
+    const tall = makeCardThumbnailPhoto('https://images.example.com/homework.png', 2, { width: 922, height: 2875 })
+    expect(tall?.sizes).toEqual([
+      { _: 'photoSize', type: 'y', w: 410, h: 1280, size: 0 },
+      { _: 'photoSize', type: 'w', w: 922, h: 2875, size: 0 },
+    ])
+
+    const invalid = makeCardThumbnailPhoto('https://images.example.com/bad.png', 2, { width: 0, height: -5 })
+    expect(invalid?.sizes).toEqual([
+      { _: 'photoSize', type: 'x', w: 320, h: 180, size: 0 },
+    ])
+  })
 })

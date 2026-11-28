@@ -5,9 +5,10 @@ import Long from 'long'
 
 const FILE_REFERENCE = new TextEncoder().encode('bridge-card-thumbnail:v1')
 const MAX_ENTRIES = 2_048
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const MAX_CACHED_BYTES = 32 * 1024 * 1024
 const MAX_REDIRECTS = 3
+const DISPLAY_PHOTO_SIDE = 1280
 const entries = new Map<string, ThumbnailEntry>()
 let cachedBytes = 0
 
@@ -17,16 +18,43 @@ interface ThumbnailEntry {
   size?: number
 }
 
-export function makeCardThumbnailPhoto(url: string | undefined, dcId: number): tl.TypePhoto | undefined {
+export function makeCardThumbnailPhoto(
+  url: string | undefined,
+  dcId: number,
+  dimensions?: { width: number, height: number },
+): tl.RawPhoto | undefined {
   const normalized = publicImageUrl(url)
   if (!normalized) return
   const [id, accessHash] = thumbnailIds(normalized)
   remember(thumbnailKey(id, accessHash), { url: normalized })
   return {
     _: 'photo', id, accessHash, fileReference: FILE_REFERENCE, date: 0,
-    sizes: [{ _: 'photoSize', type: 'x', w: 320, h: 180, size: 0 }],
+    sizes: thumbnailPhotoSizes(dimensions),
     dcId,
   }
+}
+
+function thumbnailPhotoSizes(dimensions?: { width: number, height: number }): tl.RawPhotoSize[] {
+  const width = dimensions && Number.isSafeInteger(dimensions.width) && dimensions.width > 0
+    ? dimensions.width
+    : 320
+  const height = dimensions && Number.isSafeInteger(dimensions.height) && dimensions.height > 0
+    ? dimensions.height
+    : 180
+  const maxSide = Math.max(width, height)
+  if (maxSide <= DISPLAY_PHOTO_SIDE) {
+    return [{ _: 'photoSize', type: 'x', w: width, h: height, size: 0 }]
+  }
+  const scale = DISPLAY_PHOTO_SIDE / maxSide
+  return [
+    {
+      _: 'photoSize', type: 'y',
+      w: Math.max(1, Math.round(width * scale)),
+      h: Math.max(1, Math.round(height * scale)),
+      size: 0,
+    },
+    { _: 'photoSize', type: 'w', w: width, h: height, size: 0 },
+  ]
 }
 
 export async function getCardThumbnailFile(

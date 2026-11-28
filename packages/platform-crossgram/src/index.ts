@@ -2859,13 +2859,23 @@ function mapParts(
   projectMedia?: (media: IMMedia<QQMediaLocator>) => IMMedia<QQMediaLocator>,
 ): IMMessage<QQMediaLocator>['content']['parts'] {
   const parts: IMMessage<QQMediaLocator>['content']['parts'] = []
-  // QQ 机器人消息常在 Markdown 旁附带纯文本回退段；通过 renditionKey 归一化比对后跳过重复的回退文本
+  // QQ 机器人消息常在 Markdown 旁附带纯文本回退段；通过 renditionKey 归一化比对后跳过重复的回退文本。
+  // QQ 的纯文本回退不包含内嵌图片的 alt 占位文本，因此同时准备一份去图后的归一化键。
   const markdownKey = input.parts
     .flatMap((part) => part.type === 'markdown' ? [renditionKey(parseQQMarkdown(part.content).text)] : [])
     .join('')
+  const markdownKeyWithoutImages = input.parts
+    .flatMap((part) => part.type === 'markdown'
+      ? [renditionKey(parseQQMarkdown(part.content.replace(/!\[[^\]\n]*\]\([^)\s]*\)/gu, '')).text)]
+      : [])
+    .join('')
   for (const part of input.parts) {
     if (part.type === 'text') {
-      if (markdownKey && !part.entities?.length && markdownKey.includes(renditionKey(part.text))) continue
+      const textKey = renditionKey(part.text)
+      if (!part.entities?.length && textKey && (
+        (markdownKey && markdownKey.includes(textKey))
+        || (markdownKeyWithoutImages && markdownKeyWithoutImages.includes(textKey))
+      )) continue
       const normalized = normalizeTextPart(part, reactionCatalog)
       const previous = parts.at(-1)
       if (previous?.type === 'text') {

@@ -336,6 +336,46 @@ describe('markdown and HTML articles', () => {
     expect(markdownRichMessage('\n\n')).toBeUndefined()
   })
 
+  it('embeds resolved markdown images with QQ dimension hints and deduplicates photos', () => {
+    const calls: Array<{ target: string, alt: string, dimensions?: { width: number, height: number } }> = []
+    const photo = (id: number): tl.RawPhoto => ({
+      _: 'photo', id: Long.fromNumber(id), accessHash: Long.fromNumber(id),
+      fileReference: new Uint8Array([id]), date: 0,
+      sizes: [{ _: 'photoSize', type: 'x', w: 320, h: 180, size: 0 }], dcId: 1,
+    })
+    const rich = markdownRichMessage([
+      '**作业预览**',
+      '',
+      '![preview #922px #2875px](https://qqbot.ugcimg.cn/a.png)',
+      '',
+      '![again #922px #2875px](https://qqbot.ugcimg.cn/a.png)',
+      '',
+      '![blocked](http://127.0.0.1/private.png)',
+    ].join('\n'), {
+      resolveImage: (target, alt, dimensions) => {
+        calls.push({ target, alt, dimensions })
+        return target.startsWith('https://') ? photo(42) : undefined
+      },
+    })
+
+    expect(calls).toEqual([
+      { target: 'https://qqbot.ugcimg.cn/a.png', alt: 'preview #922px #2875px', dimensions: { width: 922, height: 2875 } },
+      { target: 'https://qqbot.ugcimg.cn/a.png', alt: 'again #922px #2875px', dimensions: { width: 922, height: 2875 } },
+      { target: 'http://127.0.0.1/private.png', alt: 'blocked', dimensions: undefined },
+    ])
+    expect(rich?.blocks.map((block) => block._)).toEqual([
+      'pageBlockParagraph',
+      'pageBlockPhoto',
+      'pageBlockPhoto',
+      'pageBlockParagraph',
+    ])
+    expect(rich?.photos).toHaveLength(1)
+    expect(rich?.photos[0]?.id.toNumber()).toBe(42)
+    expect((rich?.blocks[1] as tl.RawPageBlockPhoto).photoId.toNumber()).toBe(42)
+    expect((rich?.blocks[2] as tl.RawPageBlockPhoto).photoId.toNumber()).toBe(42)
+    expect((rich?.blocks[3] as tl.RawPageBlockParagraph).text).toEqual({ _: 'textPlain', text: 'blocked' })
+  })
+
   it('sends a table block to a platform as the text a person reads', async () => {
     const conversion = await convertRichMessage({
       _: 'inputRichMessage',

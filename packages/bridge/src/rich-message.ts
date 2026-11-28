@@ -503,7 +503,35 @@ function wrapRichText(text: tl.TypeRichText, entity: tl.TypeMessageEntity): tl.T
   }
 }
 
-const MARKDOWN_IMAGE = /!\[([^\]]*)\]\(([^)\s]+)\)/gu
+const MARKDOWN_IMAGE = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/gu
+const MARKDOWN_IMAGE_DIMENSIONS = /(?:^|\s)#(\d+)px\s+#(\d+)px\s*$/u
+const MAX_MARKDOWN_IMAGE_SIDE = 16_384
+
+export interface MarkdownImageDimensions {
+  width: number
+  height: number
+}
+
+export interface MarkdownRichMessageOptions {
+  resolveImage?: (
+    target: string,
+    alt: string,
+    dimensions?: MarkdownImageDimensions,
+  ) => tl.RawPhoto | undefined
+}
+
+function parseMarkdownImageDimensions(alt: string): MarkdownImageDimensions | undefined {
+  const match = MARKDOWN_IMAGE_DIMENSIONS.exec(alt)
+  if (!match) return undefined
+  const width = Number.parseInt(match[1]!, 10)
+  const height = Number.parseInt(match[2]!, 10)
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)
+    || width <= 0 || height <= 0
+    || width > MAX_MARKDOWN_IMAGE_SIDE || height > MAX_MARKDOWN_IMAGE_SIDE) {
+    return undefined
+  }
+  return { width, height }
+}
 
 function markdownTableRow(line: string): string[] | undefined {
   const trimmed = line.trim()
@@ -554,10 +582,27 @@ function markdownTable(
 }
 
 /** 将 Markdown 正文转换为 Telegram `richMessage`（解析失败时返回 `undefined` 以回退到普通带实体文本） */
-export function markdownRichMessage(markdown: string): tl.RawRichMessage | undefined {
+export function markdownRichMessage(
+  markdown: string,
+  options?: MarkdownRichMessageOptions,
+): tl.RawRichMessage | undefined {
   try {
-    const blocks = markdownBlocks(markdown)
-    return blocks.length ? { _: 'richMessage', blocks, photos: [], documents: [] } : undefined
+    const photos: tl.RawPhoto[] = []
+    const seenPhotos = new Set<string>()
+    const resolveImage = options?.resolveImage
+    const blocks = markdownBlocks(markdown, resolveImage
+      ? (target, alt) => {
+          const photo = resolveImage(target, alt, parseMarkdownImageDimensions(alt))
+          if (!photo) return undefined
+          const key = photo.id.toString()
+          if (!seenPhotos.has(key)) {
+            seenPhotos.add(key)
+            photos.push(photo)
+          }
+          return { _: 'pageBlockPhoto', photoId: photo.id, caption: emptyCaption() }
+        }
+      : undefined)
+    return blocks.length ? { _: 'richMessage', blocks, photos, documents: [] } : undefined
   } catch {
     return undefined
   }
@@ -566,7 +611,7 @@ export function markdownRichMessage(markdown: string): tl.RawRichMessage | undef
 /** 将 Markdown 正文解析为 PageBlock 列表；`image` 回调可将内联图片引用替换为对应的媒体块。 */
 export function markdownBlocks(
   markdown: string,
-  image?: (target: string) => tl.TypePageBlock | undefined,
+  image?: (target: string, alt: string) => tl.TypePageBlock | undefined,
 ): tl.TypePageBlock[] {
   const blocks: tl.TypePageBlock[] = []
   let paragraph = ''
@@ -591,7 +636,7 @@ export function markdownBlocks(
       const alt = pieces[index + 1]
       if (alt === undefined) break
       const target = pieces[index + 2]!
-      const block = image?.(target)
+      const block = image?.(target, alt)
       if (!block) {
         paragraph += alt || target
         continue
